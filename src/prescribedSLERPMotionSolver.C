@@ -111,18 +111,6 @@ Foam::prescribedSLERPMotionSolver::prescribedSLERPMotionSolver(
           dimensionedScalar(dimless, Zero)
           ),
 
-    harmonicDisplacement_(
-        IOobject(
-            "harmonicDisplacement",
-            mesh.time().timeName(),
-            mesh,
-            IOobject::NO_READ,
-            IOobject::NO_WRITE,
-            false),
-        pointMesh::New(mesh),
-        dimensionedVector(Foam::vector(0, 0, 0))
-        ),
-
       curTimeIndex_(-1)
 
 {
@@ -172,7 +160,7 @@ Foam::prescribedSLERPMotionSolver::prescribedSLERPMotionSolver(
 
         double N_heights = motionData.size();
 
-        // Calculate the height index and fraction for each point and store the point displacement
+        // Calculate the height index and fraction for each point
         forAll(points0(), pointi)
         {
             if (scale_[pointi] > SMALL)
@@ -186,18 +174,11 @@ Foam::prescribedSLERPMotionSolver::prescribedSLERPMotionSolver(
                 // Assign the height index and fraction to the point
                 p2heightIdx_.primitiveFieldRef()[pointi] = index;
                 p2heightFraction_.primitiveFieldRef()[pointi] = fraction;
-
-                // Calculate the transformation septernion for the point
-                septernion transformation = computePointTransformation(index, fraction, motionData);
-
-                // Calculate the scaled point displacement from the point transformation
-                harmonicDisplacement_.primitiveFieldRef()[pointi] = (transformation.transformPoint(points0_[pointi]) - points0_[pointi]) * scale_[pointi];
             }
             else
             {
                 p2heightIdx_.primitiveFieldRef()[pointi] = 0;
                 p2heightFraction_.primitiveFieldRef()[pointi] = 0;
-                harmonicDisplacement_.primitiveFieldRef()[pointi] = Foam::vector(0, 0, 0);
             }
         }
 
@@ -205,8 +186,6 @@ Foam::prescribedSLERPMotionSolver::prescribedSLERPMotionSolver(
         p2heightIdx_.write();
         pointConstraints::New(pMesh).constrain(p2heightFraction_);
         p2heightFraction_.write();
-        pointConstraints::New(pMesh).constrain(harmonicDisplacement_);
-        harmonicDisplacement_.write();
     }
 
     else if (motionType_ == "nonHarmonic")
@@ -388,7 +367,7 @@ double Foam::prescribedSLERPMotionSolver::timeFractionCalculation(double timeVal
     }
     else
     {
-        // Update the current time index
+        // Read the next file
         curTimeIndexRead_++;
 
         // Safeguard against going out of bounds
@@ -402,7 +381,7 @@ double Foam::prescribedSLERPMotionSolver::timeFractionCalculation(double timeVal
         double t2 = timeArray[curTimeIndexRead_ + 1];
         double timeFraction = (timeValue - t1) / (t2 - t1);
 
-        // Copy nextMotionData to motionData
+        // Read the next file
         motionData = nextMotionData;
 
         // Clear the nextMotionData list
@@ -415,7 +394,6 @@ double Foam::prescribedSLERPMotionSolver::timeFractionCalculation(double timeVal
         stream << std::fixed << std::setprecision(9) << timeDouble; // Set precision to 9 decimal places
         std::string filename = path_ + "/motionData_" + stream.str() + ".dat";
 
-         // Read the next file
         readMotionData(filename, nextMotionData);
 
         return timeFraction;
@@ -423,17 +401,17 @@ double Foam::prescribedSLERPMotionSolver::timeFractionCalculation(double timeVal
 }
 
 // Function to compute the transformation septernion for a point in the mesh based on its height index and fraction
-Foam::septernion Foam::prescribedSLERPMotionSolver::computePointTransformation(int index, double fraction, List<List<double>> &motion) const
+Foam::septernion Foam::prescribedSLERPMotionSolver::computePointTransformation(int index, double fraction, double m, List<List<double>> &motion) const
 {
     // Interpolate translation
     vector translation1(motion[index][4], motion[index][5], motion[index][6]);
     vector translation2(motion[index + 1][4], motion[index + 1][5], motion[index + 1][6]);
-    vector translation = (1 - fraction) * translation1 + fraction * translation2;
+    vector interpolatedTranslation = ((1 - fraction) * translation1 + fraction * translation2) * m;
 
     // Extract and interpolate rotation (Euler angles)
     vector rotation1(motion[index][7], motion[index][8], motion[index][9]);
     vector rotation2(motion[index + 1][7], motion[index + 1][8], motion[index + 1][9]);
-    vector interpolatedRotation = (1 - fraction) * rotation1 + fraction * rotation2;
+    vector interpolatedRotation = ((1 - fraction) * rotation1 + fraction * rotation2) * m;
 
     // Convert rotation to quaternion
     quaternion rotationQuat(quaternion::XYZ, interpolatedRotation * degToRad());
@@ -444,7 +422,7 @@ Foam::septernion Foam::prescribedSLERPMotionSolver::computePointTransformation(i
     vector interpolatedCentre = (1 - fraction) * centre1 + fraction * centre2;
 
     // Construct septernion for combined translation and rotation
-    septernion transformation(septernion(-interpolatedCentre + -translation) * rotationQuat * septernion(interpolatedCentre));
+    septernion transformation(septernion(-interpolatedCentre + -interpolatedTranslation) * rotationQuat * septernion(interpolatedCentre));
 
     return transformation;
 }
@@ -456,7 +434,39 @@ Foam::prescribedSLERPMotionSolver::curPoints() const
 
     if (motionType_ == "harmonic")
     {
-       pointDisplacement_.primitiveFieldRef() = harmonicDisplacement_.primitiveField() * amplitude_ * sin(omega_ * t.value());
+        forAll(points0(), pointi)
+        {
+            if (scale_[pointi] > SMALL)
+            {
+                int index = p2heightIdx_[pointi];
+                double fraction = p2heightFraction_[pointi];
+
+                double m = amplitude_ * sin(omega_ * t.value());  // Calculate the motion multiplier for harmonic motion
+
+                // Calculate the transformation septernion for the point
+                septernion transformation = computePointTransformation(index, fraction, m, motionData);
+
+                // Calculate the scaled point displacement from the point transformation
+
+                // Use solid-body motion where scale = 1
+                if (scale_[pointi] > 1 - SMALL)
+                {
+                    pointDisplacement_.primitiveFieldRef()[pointi] = transformation.transformPoint(points0_[pointi]) - points0_[pointi];
+                }
+
+                // Slerp septernion interpolation: scaled septernion calculation
+                else
+                {
+                    septernion ss(slerp(septernion::I, transformation, scale_[pointi]));
+
+                    pointDisplacement_.primitiveFieldRef()[pointi] = ss.transformPoint(points0_[pointi]) - points0_[pointi];
+                }
+            }
+            else
+            {
+                pointDisplacement_.primitiveFieldRef()[pointi] = Foam::vector(0, 0, 0);
+            }
+        }
 
         // Calculate the updated points location
         tmp<pointField> newPoints(
@@ -484,10 +494,26 @@ Foam::prescribedSLERPMotionSolver::curPoints() const
                 int index = p2heightIdx_[pointi];
                 double fraction = p2heightFraction_[pointi];
 
-                septernion transformation = computePointTransformation(index, fraction, motionDataInterpolated);
+                double m = 1.0;  // For non-harmonic motion, the multiplier is always 1
+
+                // Calculate the transformation septernion for the point
+                septernion transformation = computePointTransformation(index, fraction, m, motionDataInterpolated);
 
                 // Calculate the scaled point displacement from the point transformation
-                pointDisplacement_.primitiveFieldRef()[pointi] = (transformation.transformPoint(points0_[pointi]) - points0_[pointi]) * scale_[pointi];
+
+                // Use solid-body motion where scale = 1
+                if (scale_[pointi] > 1 - SMALL)
+                {
+                    pointDisplacement_.primitiveFieldRef()[pointi] = transformation.transformPoint(points0_[pointi]) - points0_[pointi];
+                }
+                
+                // Slerp septernion interpolation: scaled septernion calculation
+                else
+                {
+                    septernion ss(slerp(septernion::I, transformation, scale_[pointi]));
+
+                    pointDisplacement_.primitiveFieldRef()[pointi] = ss.transformPoint(points0_[pointi]) - points0_[pointi];
+                }
             }
             else
             {
