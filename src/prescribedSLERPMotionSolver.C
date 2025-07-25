@@ -401,17 +401,17 @@ double Foam::prescribedSLERPMotionSolver::timeFractionCalculation(double timeVal
 }
 
 // Function to compute the transformation septernion for a point in the mesh based on its height index and fraction
-Foam::septernion Foam::prescribedSLERPMotionSolver::computePointTransformation(int index, double fraction, double m, List<List<double>> &motion) const
+Foam::septernion Foam::prescribedSLERPMotionSolver::computePointTransformation(int index, double fraction, double mult, List<List<double>> &motion) const
 {
     // Interpolate translation
     vector translation1(motion[index][4], motion[index][5], motion[index][6]);
     vector translation2(motion[index + 1][4], motion[index + 1][5], motion[index + 1][6]);
-    vector interpolatedTranslation = ((1 - fraction) * translation1 + fraction * translation2) * m;
+    vector interpolatedTranslation = ((1 - fraction) * translation1 + fraction * translation2) * mult;
 
     // Extract and interpolate rotation (Euler angles)
     vector rotation1(motion[index][7], motion[index][8], motion[index][9]);
     vector rotation2(motion[index + 1][7], motion[index + 1][8], motion[index + 1][9]);
-    vector interpolatedRotation = ((1 - fraction) * rotation1 + fraction * rotation2) * m;
+    vector interpolatedRotation = ((1 - fraction) * rotation1 + fraction * rotation2) * mult;
 
     // Convert rotation to quaternion
     quaternion rotationQuat(quaternion::XYZ, interpolatedRotation * degToRad());

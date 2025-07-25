@@ -155,7 +155,7 @@ namespace Foam
         virtual double timeFractionCalculation(double timeValue) const;
 
         //- Return the transformation septernion
-        virtual septernion computePointTransformation(int index, double fraction, double m, List<List<double>> &motion) const;
+        virtual septernion computePointTransformation(int index, double fraction, double mult, List<List<double>> &motion) const;
 
         //- Solve for motion
         virtual void solve();
