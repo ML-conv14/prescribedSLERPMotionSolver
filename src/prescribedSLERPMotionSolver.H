@@ -99,9 +99,6 @@ namespace Foam
         //- Fraction to calculate the motion of each point from the one specified in the motion data files
         pointScalarField p2heightFraction_;
 
-        //- Point displacement field calculated for the harmonic motion case
-        pointVectorField harmonicDisplacement_;
-
         //- Current time index (used for updating)
         label curTimeIndex_;
 
@@ -158,7 +155,7 @@ namespace Foam
         virtual double timeFractionCalculation(double timeValue) const;
 
         //- Return the transformation septernion
-        virtual septernion computePointTransformation(int index, double fraction, List<List<double>> &motion) const;
+        virtual septernion computePointTransformation(int index, double fraction, double m, List<List<double>> &motion) const;
 
         //- Solve for motion
         virtual void solve();
