@@ -39,6 +39,7 @@ License
 #include "interpolateSplineXY.H"
 #include "unitConversion.H"
 #include "Time.H"
+#include "IFstream.H"
 #include <iomanip>
 
 // * * * * * * * * * * * * * * Static Data Members * * * * * * * * * * * * * //
@@ -47,133 +48,172 @@ namespace Foam
 {
     defineTypeNameAndDebug(prescribedSLERPMotionSolver, 0);
 
-    addToRunTimeSelectionTable(
+    addToRunTimeSelectionTable
+    (
         motionSolver,
         prescribedSLERPMotionSolver,
-        dictionary);
+        dictionary
+    );
 }
 
 // * * * * * * * * * * * * * * * * Constructors  * * * * * * * * * * * * * * //
 
-Foam::prescribedSLERPMotionSolver::prescribedSLERPMotionSolver(
-    const polyMesh &mesh,
-    const IOdictionary &dict)
-    : displacementMotionSolver(mesh, dict, typeName),
-      patches_(coeffDict().get<wordRes>("patches")),
-      patchSet_(mesh.boundaryMesh().patchSet(patches_)),
-      di_(coeffDict().get<scalar>("innerDistance")),
-      do_(coeffDict().get<scalar>("outerDistance")),
-      coeffX_(coeffDict().get<scalar>("coefficientX")),
-      coeffY_(coeffDict().get<scalar>("coefficientY")),
-      coeffZ_(coeffDict().get<scalar>("coefficientZ")),
-      motionType_(coeffDict().get<word>("motionType")),
-      amplitude_(coeffDict().getOrDefault("amplitude", 1.0)),
-      omega_(coeffDict().getOrDefault("omega", 1.0)),
-      path_(
-          coeffDict().found("path")
-              ? coeffDict().get<fileName>("path").expand()
-              : fileName("$FOAM_CASE").expand()
-           ),
-
-      scale_(
-          IOobject(
-              "motionScale",
-              mesh.time().timeName(),
-              mesh,
-              IOobject::NO_READ,
-              IOobject::NO_WRITE,
-              false),
-          pointMesh::New(mesh),
-          dimensionedScalar(dimless, Zero)
-          ),
-
-      p2heightIdx_(
-          IOobject(
-              "heightIdxMatching",
-              mesh.time().timeName(),
-              mesh,
-              IOobject::NO_READ,
-              IOobject::NO_WRITE,
-              false),
-          pointMesh::New(mesh),
-          dimensionedScalar(dimless, Zero)
-          ),
-
-      p2heightFraction_(
-          IOobject(
-              "heightFractionMatching",
-              mesh.time().timeName(),
-              mesh,
-              IOobject::NO_READ,
-              IOobject::NO_WRITE,
-              false),
-          pointMesh::New(mesh),
-          dimensionedScalar(dimless, Zero)
-          ),
-
-      curTimeIndex_(-1)
-
+Foam::prescribedSLERPMotionSolver::prescribedSLERPMotionSolver
+(
+    const polyMesh& mesh,
+    const IOdictionary& dict
+)
+:
+    displacementMotionSolver(mesh, dict, typeName),
+    patches_(coeffDict().get<wordRes>("patches")),
+    patchSet_(mesh.boundaryMesh().patchSet(patches_)),
+    di_(coeffDict().get<scalar>("innerDistance")),
+    do_(coeffDict().get<scalar>("outerDistance")),
+    heightMode_(coeffDict().get<word>("heightMode")),
+    axisDirection_(Zero),
+    radialCoeffs_(Zero),
+    motionType_(coeffDict().get<word>("motionType")),
+    amplitude_(coeffDict().getOrDefault("amplitude", scalar(1))),
+    omega_(coeffDict().getOrDefault("omega", scalar(1))),
+    path_
+    (
+        coeffDict().found("path")
+            ? coeffDict().get<fileName>("path").expand()
+            : fileName("$FOAM_CASE").expand()
+    ),
+    scale_
+    (
+        IOobject
+        (
+            "motionScale",
+            mesh.time().timeName(),
+            mesh,
+            IOobject::NO_READ,
+            IOobject::NO_WRITE,
+            false
+        ),
+        pointMesh::New(mesh),
+        dimensionedScalar(dimless, Zero)
+    ),
+    p2heightIdx_
+    (
+        IOobject
+        (
+            "heightIdxMatching",
+            mesh.time().timeName(),
+            mesh,
+            IOobject::NO_READ,
+            IOobject::NO_WRITE,
+            false
+        ),
+        pointMesh::New(mesh),
+        dimensionedScalar(dimless, Zero)
+    ),
+    p2heightFraction_
+    (
+        IOobject
+        (
+            "heightFractionMatching",
+            mesh.time().timeName(),
+            mesh,
+            IOobject::NO_READ,
+            IOobject::NO_WRITE,
+            false
+        ),
+        pointMesh::New(mesh),
+        dimensionedScalar(dimless, Zero)
+    ),
+    curTimeIndex_(-1),
+    curTimeIndexRead_(0)
 {
+    // Validate heightMode and read the relevant axis/coefficient vector
+    if (heightMode_ == "axial")
+    {
+        axisDirection_ = coeffDict().get<vector>("axisDirection");
+        const scalar magAxis = mag(axisDirection_);
+        if (magAxis < SMALL)
+        {
+            FatalErrorInFunction
+                << "axisDirection has zero magnitude"
+                << exit(FatalError);
+        }
+        axisDirection_ /= magAxis;
+    }
+    else if (heightMode_ == "radial")
+    {
+        radialCoeffs_ = coeffDict().get<vector>("radialCoeffs");
+    }
+    else
+    {
+        FatalErrorInFunction
+            << "Unknown heightMode: " << heightMode_ << nl
+            << "Valid options are: axial, radial"
+            << exit(FatalError);
+    }
 
-// Calculate scaling factor everywhere
-// ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-    const pointMesh &pMesh = pointMesh::New(mesh);
+    // Calculate scaling factor everywhere
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    const pointMesh& pMesh = pointMesh::New(mesh);
 
     pointPatchDist pDist(pMesh, patchSet_, points0());
 
     // Scaling: 1 up to di then linear down to 0 at do away from patches
     scale_.primitiveFieldRef() =
-        min(
-            max(
+        min
+        (
+            max
+            (
                 (do_ - pDist.primitiveField()) / (do_ - di_),
                 scalar(0)
-                ),
+            ),
             scalar(1)
-            );
+        );
 
     // Convert the scale function to a cosine
     scale_.primitiveFieldRef() =
-        min(
-            max(
-                0.5 - 0.5 * cos(scale_.primitiveField() * Foam::constant::mathematical::pi),
+        min
+        (
+            max
+            (
+                scalar(0.5) - scalar(0.5)
+                    * cos
+                      (
+                          scale_.primitiveField()
+                        * Foam::constant::mathematical::pi
+                      ),
                 scalar(0)
-                ),
+            ),
             scalar(1)
-            );
+        );
 
     pointConstraints::New(pMesh).constrain(scale_);
     scale_.write();
-    
+
     // Set the current time index to 0
     curTimeIndexRead_ = 0;
 
-
-// Read the motion data from the file and compute height index and fraction
-// ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
+    // Read the motion data and compute height index and fraction
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     if (motionType_ == "harmonic")
     {
-        // Read the motion data from the file
-        std::string filename = path_ + "/motionData.dat";
+        const fileName filename = path_ + "/motionData.dat";
         readMotionData(filename, motionData);
 
-        double N_heights = motionData.size();
+        const label N_heights = motionData.size();
 
-        // Calculate the height index and fraction for each point
         forAll(points0(), pointi)
         {
             if (scale_[pointi] > SMALL)
             {
-                // Calculate the height index and fraction for the point
-                auto result = p2HeightAssociation(points0()[pointi], motionData, N_heights);
+                auto result = p2HeightAssociation
+                (
+                    points0()[pointi],
+                    motionData,
+                    N_heights
+                );
 
-                int index = result.first;
-                double fraction = result.second;
-
-                // Assign the height index and fraction to the point
-                p2heightIdx_.primitiveFieldRef()[pointi] = index;
-                p2heightFraction_.primitiveFieldRef()[pointi] = fraction;
+                p2heightIdx_.primitiveFieldRef()[pointi] = result.first;
+                p2heightFraction_.primitiveFieldRef()[pointi] = result.second;
             }
             else
             {
@@ -187,65 +227,61 @@ Foam::prescribedSLERPMotionSolver::prescribedSLERPMotionSolver(
         pointConstraints::New(pMesh).constrain(p2heightFraction_);
         p2heightFraction_.write();
     }
-
     else if (motionType_ == "nonHarmonic")
     {
-        // Read time values from file
-        std::string time_filename = path_ + "/timeArray.dat";
-        std::ifstream timeFile(time_filename);
-        if (!timeFile.is_open())
+        const fileName time_filename = path_ + "/timeArray.dat";
+        IFstream timeFile(time_filename);
+
+        if (!timeFile.good())
         {
-            FatalErrorInFunction << "Error opening file: " << time_filename << exit(FatalError);
-            return;
+            FatalErrorInFunction
+                << "Error opening file: " << time_filename
+                << exit(FatalError);
         }
 
-        // Read number of time values
-        double N_times;
+        label N_times;
         timeFile >> N_times;
 
-        double tmp_timeStep;
-        for (int i = 0; i < N_times; ++i)
+        scalar tmp_timeStep;
+        for (label i = 0; i < N_times; ++i)
         {
             timeFile >> tmp_timeStep;
             timeArray.append(tmp_timeStep);
         }
 
-        timeFile.close();
+        // Load first two motion data files
+        {
+            std::ostringstream stream1;
+            stream1 << std::fixed << std::setprecision(9)
+                    << timeArray[0];
+            const fileName filename1 =
+                path_ + "/motionData_" + stream1.str() + ".dat";
+            readMotionData(filename1, motionData);
+        }
+        {
+            std::ostringstream stream2;
+            stream2 << std::fixed << std::setprecision(9)
+                    << timeArray[1];
+            const fileName filename2 =
+                path_ + "/motionData_" + stream2.str() + ".dat";
+            readMotionData(filename2, nextMotionData);
+        }
 
-        double timeDouble = timeArray[0];
+        const label N_heights = motionData.size();
 
-        // Use a stringstream to format the time value with fixed precision
-        std::ostringstream stream1;
-        stream1 << std::fixed << std::setprecision(9) << timeDouble; // Set precision to 9 decimal places
-        std::string filename1 = path_ + "/motionData_" + stream1.str() + ".dat";
-
-        readMotionData(filename1, motionData);
-
-        timeDouble = timeArray[1];
-
-        // Use a stringstream to format the time value with fixed precision
-        std::ostringstream stream2;
-        stream2 << std::fixed << std::setprecision(9) << timeDouble; // Set precision to 9 decimal places
-        std::string filename2 = path_ + "/motionData_" + stream2.str() + ".dat";
-
-        readMotionData(filename2, nextMotionData);
-
-        double N_heights = motionData.size();
-
-        // Calculate the height index and fraction for each point
         forAll(points0(), pointi)
         {
             if (scale_[pointi] > SMALL)
             {
-                // Calculate the height index and fraction for the point
-                auto result = p2HeightAssociation(points0()[pointi], motionData, N_heights);
+                auto result = p2HeightAssociation
+                (
+                    points0()[pointi],
+                    motionData,
+                    N_heights
+                );
 
-                int index = result.first;
-                double fraction = result.second;
-
-                // Assign the height index and fraction to the point
-                p2heightIdx_.primitiveFieldRef()[pointi] = index;
-                p2heightFraction_.primitiveFieldRef()[pointi] = fraction;
+                p2heightIdx_.primitiveFieldRef()[pointi] = result.first;
+                p2heightFraction_.primitiveFieldRef()[pointi] = result.second;
             }
             else
             {
@@ -259,140 +295,175 @@ Foam::prescribedSLERPMotionSolver::prescribedSLERPMotionSolver(
         pointConstraints::New(pMesh).constrain(p2heightFraction_);
         p2heightFraction_.write();
     }
-
     else
     {
         FatalErrorInFunction
-            << "Unknown motion type: " << motionType_ << endl
-            << "Valid options are: harmonic and nonHarmonic" << exit(FatalError);
+            << "Unknown motion type: " << motionType_ << nl
+            << "Valid options are: harmonic and nonHarmonic"
+            << exit(FatalError);
     }
-
 }
 
 // * * * * * * * * * * * * * * * Member Functions  * * * * * * * * * * * * * //
 
-// Function to read the motion data from a file
-void Foam::prescribedSLERPMotionSolver::readMotionData(std::string &filename, List<List<double>> &motion) const
+void Foam::prescribedSLERPMotionSolver::readMotionData
+(
+    const fileName& filename,
+    List<List<scalar>>& motion
+) const
 {
-    std::ifstream inputFile(filename);
-    if (!inputFile.is_open())
+    IFstream inputFile(filename);
+
+    if (!inputFile.good())
     {
-        FatalErrorInFunction << "Error opening file: " << filename << exit(FatalError);
+        FatalErrorInFunction
+            << "Error opening file: " << filename
+            << exit(FatalError);
     }
 
-    // Read number of heights in the mesh motion file
-    double N_heights;
+    label N_heights;
     inputFile >> N_heights;
 
-    int N_columns = 10; // Number of columns in the motion data file
+    const label N_columns = 10;
 
-    // Read centre of rotation, translation, and rotation values for each height
-    for (int heightIdx = 0; heightIdx < N_heights; ++heightIdx)
+    for (label heightIdx = 0; heightIdx < N_heights; ++heightIdx)
     {
-        List<double> tmp_height(N_columns);
-        for (int i = 0; i < N_columns; ++i)
+        List<scalar> tmp_height(N_columns);
+        for (label i = 0; i < N_columns; ++i)
         {
             inputFile >> tmp_height[i];
         }
         motion.append(tmp_height);
     }
-
-    inputFile.close();
 }
 
-// Function to associate each point in the mesh to a specific height/radius by calculating height index and fraction of each point
-std::pair<int, double> Foam::prescribedSLERPMotionSolver::p2HeightAssociation(Vector<double> &point, List<List<double>> &motion, double N_heights)
+
+std::pair<Foam::label, Foam::scalar>
+Foam::prescribedSLERPMotionSolver::p2HeightAssociation
+(
+    const point& pt,
+    const List<List<scalar>>& motion,
+    const label N_heights
+) const
 {
-    // Multiply each coordinate by the corresponding coefficient
-    double x = coeffX_ * point[0];
-    double y = coeffY_ * point[1];
-    double z = coeffZ_ * point[2];
+    scalar height;
 
-    // Calculate the height/radius of each point
-    double magnitude = sqrt(x * x + y * y + z * z);
+    if (heightMode_ == "axial")
+    {
+        // Axial mode: signed projection onto body axis direction
+        // h = axisDirection . p  (axisDirection_ normalised in constructor)
+        height = (axisDirection_ & pt);
+    }
+    else // radial
+    {
+        // Radial mode: signed weighted radial distance
+        // h = sign(p_dom) * sqrt((cx*x)^2 + (cy*y)^2 + (cz*z)^2)
+        // where p_dom is the weighted coordinate with largest absolute
+        // value, used to recover the sign of the radial distance.
+        const vector weighted
+        (
+            radialCoeffs_.x() * pt.x(),
+            radialCoeffs_.y() * pt.y(),
+            radialCoeffs_.z() * pt.z()
+        );
 
-    // Determine the sign of the height/radius based on the dominant coefficient
-    double values[] = {x, y, z};
-    double absValues[] = {std::abs(x), std::abs(y), std::abs(z)};
-    int dominantIndex = std::distance(absValues, std::max_element(absValues, absValues + 3));
-    double sign = (values[dominantIndex] >= 0) ? 1.0 : -1.0;
+        const scalar radius = Foam::sqrt
+        (
+            max
+            (
+                sqr(weighted.x())
+              + sqr(weighted.y())
+              + sqr(weighted.z()),
+                scalar(0)
+            )
+        );
 
-    // Apply the sign to the magnitude to get the signed height
-    double height = sign * magnitude;
+        // Recover sign from dominant weighted component
+        label dominantIndex = 0;
+        scalar maxVal = Foam::mag(weighted.x());
 
-    // Assign each points in the mesh to a height index based on the height/radius
-    int index = 0;
-    double fraction = 0.0;
+        if (Foam::mag(weighted.y()) > maxVal)
+        {
+            maxVal = Foam::mag(weighted.y());
+            dominantIndex = 1;
+        }
+        if (Foam::mag(weighted.z()) > maxVal)
+        {
+            dominantIndex = 2;
+        }
 
-    // Handle edge cases
+        const scalar signVal =
+            (weighted[dominantIndex] >= 0) ? scalar(1) : scalar(-1);
+
+        height = signVal * radius;
+    }
+
+    // Assign point to height interval
+    label index = 0;
+    scalar fraction = scalar(0);
+
     if (height < motion[0][0])
     {
         index = 0;
-        fraction = 0.0;
+        fraction = scalar(0);
     }
     else if (height > motion[N_heights - 1][0])
     {
         index = N_heights - 2;
-        fraction = 1.0;
+        fraction = scalar(1);
     }
     else
     {
-        // Find the heights interval
-        for (int i = 0; i < N_heights - 1; i++)
+        for (label i = 0; i < N_heights - 1; i++)
         {
             if (height >= motion[i][0] && height <= motion[i + 1][0])
             {
                 index = i;
-                fraction = (height - motion[i][0]) / (motion[i + 1][0] - motion[i][0]);
+                fraction =
+                    (height - motion[i][0])
+                  / (motion[i + 1][0] - motion[i][0]);
                 break;
             }
         }
     }
 
-    return std::pair<int, double>(index, fraction);
+    return std::pair<label, scalar>(index, fraction);
 }
 
-// Function to calculate the time fraction needed for interpolation between motion data at two consecutive time-steps
-// This function will read the next motion data file if the current time is greater than the last time-step saved
-double Foam::prescribedSLERPMotionSolver::timeFractionCalculation(double timeValue) const
+
+Foam::scalar
+Foam::prescribedSLERPMotionSolver::timeFractionCalculation
+(
+    scalar timeValue
+) const
 {
     if (timeValue <= timeArray[curTimeIndexRead_ + 1])
     {
-        // Interpolate between the two closest time values
-        double t1 = timeArray[curTimeIndexRead_];
-        double t2 = timeArray[curTimeIndexRead_ + 1];
-        double timeFraction = (timeValue - t1) / (t2 - t1);
-
-        return timeFraction;
+        const scalar t1 = timeArray[curTimeIndexRead_];
+        const scalar t2 = timeArray[curTimeIndexRead_ + 1];
+        return (timeValue - t1) / (t2 - t1);
     }
     else
     {
-        // Read the next file
         curTimeIndexRead_++;
 
-        // Safeguard against going out of bounds
         if (curTimeIndexRead_ >= timeArray.size() - 1)
         {
             curTimeIndexRead_ = timeArray.size() - 2;
         }
 
-        // Interpolate between the two closest time values
-        double t1 = timeArray[curTimeIndexRead_];
-        double t2 = timeArray[curTimeIndexRead_ + 1];
-        double timeFraction = (timeValue - t1) / (t2 - t1);
+        const scalar t1 = timeArray[curTimeIndexRead_];
+        const scalar t2 = timeArray[curTimeIndexRead_ + 1];
+        const scalar timeFraction = (timeValue - t1) / (t2 - t1);
 
-        // Read the next file
         motionData = nextMotionData;
-
-        // Clear the nextMotionData list
         nextMotionData.clear();
 
-        double timeDouble = timeArray[curTimeIndexRead_ + 1];
-
-        // Use a stringstream to format the time value with fixed precision
         std::ostringstream stream;
-        stream << std::fixed << std::setprecision(9) << timeDouble; // Set precision to 9 decimal places
-        std::string filename = path_ + "/motionData_" + stream.str() + ".dat";
+        stream << std::fixed << std::setprecision(9)
+               << timeArray[curTimeIndexRead_ + 1];
+        const fileName filename =
+            path_ + "/motionData_" + stream.str() + ".dat";
 
         readMotionData(filename, nextMotionData);
 
@@ -400,37 +471,74 @@ double Foam::prescribedSLERPMotionSolver::timeFractionCalculation(double timeVal
     }
 }
 
-// Function to compute the transformation septernion for a point in the mesh based on its height index and fraction
-Foam::septernion Foam::prescribedSLERPMotionSolver::computePointTransformation(int index, double fraction, double mult, List<List<double>> &motion) const
+
+Foam::septernion
+Foam::prescribedSLERPMotionSolver::computePointTransformation
+(
+    const label index,
+    const scalar fraction,
+    const scalar mult,
+    const List<List<scalar>>& motion
+) const
 {
-    // Interpolate translation
-    vector translation1(motion[index][4], motion[index][5], motion[index][6]);
-    vector translation2(motion[index + 1][4], motion[index + 1][5], motion[index + 1][6]);
-    vector interpolatedTranslation = ((1 - fraction) * translation1 + fraction * translation2) * mult;
+    // Interpolate and scale translation
+    const vector translation1
+    (
+        motion[index][4], motion[index][5], motion[index][6]
+    );
+    const vector translation2
+    (
+        motion[index + 1][4], motion[index + 1][5], motion[index + 1][6]
+    );
+    const vector interpolatedTranslation =
+        ((scalar(1) - fraction) * translation1
+      + fraction * translation2) * mult;
 
     // Extract and interpolate rotation (Euler angles)
-    vector rotation1(motion[index][7], motion[index][8], motion[index][9]);
-    vector rotation2(motion[index + 1][7], motion[index + 1][8], motion[index + 1][9]);
-    vector interpolatedRotation = ((1 - fraction) * rotation1 + fraction * rotation2) * mult;
+    const vector rotation1
+    (
+        motion[index][7], motion[index][8], motion[index][9]
+    );
+    const vector rotation2
+    (
+        motion[index + 1][7], motion[index + 1][8], motion[index + 1][9]
+    );
+    const vector interpolatedRotation =
+        ((scalar(1) - fraction) * rotation1
+      + fraction * rotation2) * mult;
 
     // Convert rotation to quaternion
-    quaternion rotationQuat(quaternion::XYZ, interpolatedRotation * degToRad());
+    const quaternion rotationQuat
+    (
+        quaternion::XYZ, interpolatedRotation * degToRad()
+    );
 
     // Extract and interpolate centre of rotation
-    vector centre1(motion[index][1], motion[index][2], motion[index][3]);
-    vector centre2(motion[index + 1][1], motion[index + 1][2], motion[index + 1][3]);
-    vector interpolatedCentre = (1 - fraction) * centre1 + fraction * centre2;
+    const vector centre1
+    (
+        motion[index][1], motion[index][2], motion[index][3]
+    );
+    const vector centre2
+    (
+        motion[index + 1][1], motion[index + 1][2], motion[index + 1][3]
+    );
+    const vector interpolatedCentre =
+        (scalar(1) - fraction) * centre1 + fraction * centre2;
 
     // Construct septernion for combined translation and rotation
-    septernion transformation(septernion(-interpolatedCentre + -interpolatedTranslation) * rotationQuat * septernion(interpolatedCentre));
-
-    return transformation;
+    return septernion
+    (
+        septernion(-interpolatedCentre + -interpolatedTranslation)
+      * rotationQuat
+      * septernion(interpolatedCentre)
+    );
 }
+
 
 Foam::tmp<Foam::pointField>
 Foam::prescribedSLERPMotionSolver::curPoints() const
 {
-    const Time &t = this->db().time();
+    const Time& t = this->db().time();
 
     if (motionType_ == "harmonic")
     {
@@ -438,119 +546,134 @@ Foam::prescribedSLERPMotionSolver::curPoints() const
         {
             if (scale_[pointi] > SMALL)
             {
-                int index = p2heightIdx_[pointi];
-                double fraction = p2heightFraction_[pointi];
+                const label index = p2heightIdx_[pointi];
+                const scalar fraction = p2heightFraction_[pointi];
 
-                double m = amplitude_ * sin(omega_ * t.value());  // Calculate the motion multiplier for harmonic motion
+                // Motion multiplier for harmonic motion
+                const scalar m = amplitude_ * sin(omega_ * t.value());
 
-                // Calculate the transformation septernion for the point
-                septernion transformation = computePointTransformation(index, fraction, m, motionData);
-
-                // Calculate the scaled point displacement from the point transformation
+                const septernion transformation = computePointTransformation
+                (
+                    index, fraction, m, motionData
+                );
 
                 // Use solid-body motion where scale = 1
-                if (scale_[pointi] > 1 - SMALL)
+                if (scale_[pointi] > scalar(1) - SMALL)
                 {
-                    pointDisplacement_.primitiveFieldRef()[pointi] = transformation.transformPoint(points0_[pointi]) - points0_[pointi];
+                    pointDisplacement_.primitiveFieldRef()[pointi] =
+                        transformation.transformPoint(points0_[pointi])
+                      - points0_[pointi];
                 }
-
-                // Slerp septernion interpolation: scaled septernion calculation
+                // Slerp septernion interpolation: scaled septernion
                 else
                 {
-                    septernion ss(slerp(septernion::I, transformation, scale_[pointi]));
-
-                    pointDisplacement_.primitiveFieldRef()[pointi] = ss.transformPoint(points0_[pointi]) - points0_[pointi];
+                    septernion ss
+                    (
+                        slerp(septernion::I, transformation, scale_[pointi])
+                    );
+                    pointDisplacement_.primitiveFieldRef()[pointi] =
+                        ss.transformPoint(points0_[pointi])
+                      - points0_[pointi];
                 }
             }
             else
             {
-                pointDisplacement_.primitiveFieldRef()[pointi] = Foam::vector(0, 0, 0);
+                pointDisplacement_.primitiveFieldRef()[pointi] = vector::zero;
             }
         }
 
-        // Calculate the updated points location
-        tmp<pointField> newPoints(
-            points0() + pointDisplacement_.primitiveField());
-            
-        return newPoints;
+        return tmp<pointField>
+        (
+            new pointField(points0() + pointDisplacement_.primitiveField())
+        );
     }
-
     else if (motionType_ == "nonHarmonic")
     {
-        double timeFraction = timeFractionCalculation(t.value());
+        const scalar timeFraction = timeFractionCalculation(t.value());
 
         motionDataInterpolated = motionData;
 
-        // Calculate the interpolated motion data at the current time-step from the clostest two time-steps saved in timeArray
+        // Interpolate motion data at the current time step from the
+        // closest two time steps saved in timeArray
         forAll(motionDataInterpolated, i)
         {
-            motionDataInterpolated[i] = (1 - timeFraction) * motionData[i] + timeFraction * nextMotionData[i];
+            motionDataInterpolated[i] =
+                (scalar(1) - timeFraction) * motionData[i]
+              + timeFraction * nextMotionData[i];
         }
 
         forAll(points0(), pointi)
         {
             if (scale_[pointi] > SMALL)
             {
-                int index = p2heightIdx_[pointi];
-                double fraction = p2heightFraction_[pointi];
+                const label index = p2heightIdx_[pointi];
+                const scalar fraction = p2heightFraction_[pointi];
 
-                double m = 1.0;  // For non-harmonic motion, the multiplier is always 1
+                // For non-harmonic motion, the multiplier is always 1
+                const scalar m = scalar(1);
 
-                // Calculate the transformation septernion for the point
-                septernion transformation = computePointTransformation(index, fraction, m, motionDataInterpolated);
-
-                // Calculate the scaled point displacement from the point transformation
+                const septernion transformation = computePointTransformation
+                (
+                    index, fraction, m, motionDataInterpolated
+                );
 
                 // Use solid-body motion where scale = 1
-                if (scale_[pointi] > 1 - SMALL)
+                if (scale_[pointi] > scalar(1) - SMALL)
                 {
-                    pointDisplacement_.primitiveFieldRef()[pointi] = transformation.transformPoint(points0_[pointi]) - points0_[pointi];
+                    pointDisplacement_.primitiveFieldRef()[pointi] =
+                        transformation.transformPoint(points0_[pointi])
+                      - points0_[pointi];
                 }
-                
-                // Slerp septernion interpolation: scaled septernion calculation
+                // Slerp septernion interpolation: scaled septernion
                 else
                 {
-                    septernion ss(slerp(septernion::I, transformation, scale_[pointi]));
-
-                    pointDisplacement_.primitiveFieldRef()[pointi] = ss.transformPoint(points0_[pointi]) - points0_[pointi];
+                    septernion ss
+                    (
+                        slerp(septernion::I, transformation, scale_[pointi])
+                    );
+                    pointDisplacement_.primitiveFieldRef()[pointi] =
+                        ss.transformPoint(points0_[pointi])
+                      - points0_[pointi];
                 }
             }
             else
             {
-                pointDisplacement_.primitiveFieldRef()[pointi] = Foam::vector(0, 0, 0);
+                pointDisplacement_.primitiveFieldRef()[pointi] = vector::zero;
             }
         }
 
-        // Calculate the updated points location
-        tmp<pointField> newPoints(
-            points0() + pointDisplacement_.primitiveField());
-            
-        return newPoints;
+        return tmp<pointField>
+        (
+            new pointField(points0() + pointDisplacement_.primitiveField())
+        );
     }
-
     else
     {
-        return 0;
+        FatalErrorInFunction
+            << "Unknown motion type: " << motionType_
+            << exit(FatalError);
+
+        return tmp<pointField>(nullptr);
     }
 }
 
+
 void Foam::prescribedSLERPMotionSolver::solve()
 {
-
     if (mesh().nPoints() != points0().size())
     {
         FatalErrorInFunction
-            << "The number of points in the mesh seems to have changed." << endl
+            << "The number of points in the mesh seems to have changed." << nl
             << "In constant/polyMesh there are " << points0().size()
             << " points; in the current mesh there are " << mesh().nPoints()
             << " points." << exit(FatalError);
     }
 
     // Displacement has changed. Update boundary conditions
-    pointConstraints::New(
-        pointDisplacement_.mesh())
-        .constrainDisplacement(pointDisplacement_);
-        
+    pointConstraints::New
+    (
+        pointDisplacement_.mesh()
+    ).constrainDisplacement(pointDisplacement_);
 }
 
 
