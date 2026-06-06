@@ -29,10 +29,17 @@ patches         (Cylinder);   // Name of the deforming patch
 innerDistance   0.1;          // Normal inner distance from the deforming patch
 outerDistance   12;           // Normal outer distance from the deforming patch
 
-// Coefficients defining the height/radius calculation --> z-axis in this case
-coefficientX 0.0;
-coefficientY 0.0;
-coefficientZ 1.0;
+// Height computation mode: 'axial' or 'radial'
+heightMode      axial;
+
+// Axial mode: spanwise direction of the body
+// May be a non-unit vector; it is normalised automatically by the solver
+axisDirection   (0 0 1);
+
+// radialCoeffs (used instead of axisDirection when heightMode is 'radial'):
+// weighting coefficients, non-zero for the coordinates perpendicular
+// to the rotation axis. E.g. (0 1 1) gives sqrt(y^2 + z^2) about the x-axis.
+// radialCoeffs   (0 1 1);
 
 motionType nonHarmonic; // Non-harmonic motion type
 
