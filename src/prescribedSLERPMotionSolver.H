@@ -129,8 +129,11 @@ class prescribedSLERPMotionSolver
         //- Motion data at the next saved time step in timeArray
         mutable List<List<scalar>> nextMotionData;
 
-        //- Interpolated motion data for non-harmonic motion
-        mutable List<List<scalar>> motionDataInterpolated;
+        //- Cached point transformations at the current saved time step in timeArray
+        mutable List<septernion> cachedTransform1_;
+
+        //- Cached point transformations at the next saved time step in timeArray
+        mutable List<septernion> cachedTransform2_;
 
         //- Saved time values for non-harmonic motion
         mutable List<scalar> timeArray;
@@ -138,7 +141,7 @@ class prescribedSLERPMotionSolver
         //- Current time index for reading motion data files
         mutable label curTimeIndexRead_;
 
-
+        
     // Private Member Functions
 
         //- No copy construct
@@ -192,8 +195,11 @@ public:
             const label N_heights
         ) const;
 
-        //- Return time fraction for interpolation between motion data files
-        virtual scalar timeFractionCalculation(scalar timeValue) const;
+        //- Return the time fraction for interpolation between the two bounding
+        //  motion data time levels, together with a flag indicating whether the
+        //  time window has advanced (and hence the cached transformations must
+        //  be rebuilt).
+        virtual std::pair<scalar, bool> timeFractionCalculation(scalar timeValue) const;
 
         //- Return the transformation septernion for a given point
         virtual septernion computePointTransformation
