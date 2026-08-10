@@ -269,24 +269,33 @@ Foam::prescribedSLERPMotionSolver::prescribedSLERPMotionSolver
 
         const label N_heights = motionData.size();
 
+        // Size the caches to the number of points
+        cachedTransform1_.setSize(points0().size(), septernion::I);
+        cachedTransform2_.setSize(points0().size(), septernion::I);
+
         forAll(points0(), pointi)
         {
             if (scale_[pointi] > SMALL)
             {
-                auto result = p2HeightAssociation
-                (
-                    points0()[pointi],
-                    motionData,
-                    N_heights
-                );
-
+                auto result = p2HeightAssociation(points0()[pointi], motionData, N_heights);
                 p2heightIdx_.primitiveFieldRef()[pointi] = result.first;
                 p2heightFraction_.primitiveFieldRef()[pointi] = result.second;
+            
+                const label index = result.first;
+                const scalar fraction = result.second;
+                const scalar m = scalar(1);
+            
+                cachedTransform1_[pointi] =
+                    computePointTransformation(index, fraction, m, motionData);
+                cachedTransform2_[pointi] =
+                    computePointTransformation(index, fraction, m, nextMotionData);
             }
             else
             {
                 p2heightIdx_.primitiveFieldRef()[pointi] = 0;
                 p2heightFraction_.primitiveFieldRef()[pointi] = 0;
+                cachedTransform1_[pointi] = septernion::I;
+                cachedTransform2_[pointi] = septernion::I;
             }
         }
 
@@ -420,8 +429,7 @@ Foam::prescribedSLERPMotionSolver::p2HeightAssociation
             {
                 index = i;
                 fraction =
-                    (height - motion[i][0])
-                  / (motion[i + 1][0] - motion[i][0]);
+                    (height - motion[i][0]) / (motion[i + 1][0] - motion[i][0]);
                 break;
             }
         }
@@ -431,7 +439,7 @@ Foam::prescribedSLERPMotionSolver::p2HeightAssociation
 }
 
 
-Foam::scalar
+std::pair<Foam::scalar, bool>
 Foam::prescribedSLERPMotionSolver::timeFractionCalculation
 (
     scalar timeValue
@@ -441,7 +449,8 @@ Foam::prescribedSLERPMotionSolver::timeFractionCalculation
     {
         const scalar t1 = timeArray[curTimeIndexRead_];
         const scalar t2 = timeArray[curTimeIndexRead_ + 1];
-        return (timeValue - t1) / (t2 - t1);
+        const scalar timeFraction = (timeValue - t1) / (t2 - t1);
+        return std::pair<scalar, bool>(timeFraction, false);
     }
     else
     {
@@ -467,7 +476,7 @@ Foam::prescribedSLERPMotionSolver::timeFractionCalculation
 
         readMotionData(filename, nextMotionData);
 
-        return timeFraction;
+        return std::pair<scalar, bool>(timeFraction, true);
     }
 }
 
@@ -491,10 +500,9 @@ Foam::prescribedSLERPMotionSolver::computePointTransformation
         motion[index + 1][4], motion[index + 1][5], motion[index + 1][6]
     );
     const vector interpolatedTranslation =
-        ((scalar(1) - fraction) * translation1
-      + fraction * translation2) * mult;
+        ((scalar(1) - fraction) * translation1 + fraction * translation2) * mult;
 
-    // Extract and interpolate rotation (Euler angles)
+    // Extract and interpolate rotation (SLERP)
     const vector rotation1
     (
         motion[index][7], motion[index][8], motion[index][9]
@@ -503,15 +511,13 @@ Foam::prescribedSLERPMotionSolver::computePointTransformation
     (
         motion[index + 1][7], motion[index + 1][8], motion[index + 1][9]
     );
-    const vector interpolatedRotation =
-        ((scalar(1) - fraction) * rotation1
-      + fraction * rotation2) * mult;
+    const quaternion q1(quaternion::XYZ, rotation1 * degToRad());
+    const quaternion q2(quaternion::XYZ, rotation2 * degToRad());
 
-    // Convert rotation to quaternion
-    const quaternion rotationQuat
-    (
-        quaternion::XYZ, interpolatedRotation * degToRad()
-    );
+    // Spherically interpolate the orientation between the two sections, 
+    // then apply the motion multiplier as a fraction of the rotation
+    const quaternion qInterp = slerp(q1, q2, fraction);
+    const quaternion rotationQuat = slerp(quaternion::I, qInterp, mult);
 
     // Extract and interpolate centre of rotation
     const vector centre1
@@ -589,42 +595,37 @@ Foam::prescribedSLERPMotionSolver::curPoints() const
     }
     else if (motionType_ == "nonHarmonic")
     {
-        const scalar timeFraction = timeFractionCalculation(t.value());
-
-        motionDataInterpolated = motionData;
-
-        // Interpolate motion data at the current time step from the
-        // closest two time steps saved in timeArray
-        forAll(motionDataInterpolated, i)
-        {
-            motionDataInterpolated[i] =
-                (scalar(1) - timeFraction) * motionData[i]
-              + timeFraction * nextMotionData[i];
-        }
-
+        auto result = timeFractionCalculation(t.value());
+        const scalar timeFraction = result.first;
+        const bool motionDataAdvanced = result.second;
+    
         forAll(points0(), pointi)
         {
             if (scale_[pointi] > SMALL)
             {
-                const label index = p2heightIdx_[pointi];
-                const scalar fraction = p2heightFraction_[pointi];
-
-                // For non-harmonic motion, the multiplier is always 1
-                const scalar m = scalar(1);
-
-                const septernion transformation = computePointTransformation
-                (
-                    index, fraction, m, motionDataInterpolated
-                );
-
-                // Use solid-body motion where scale = 1
+                // Rebuild cached transformations only when the window advanced
+                if (motionDataAdvanced)
+                {
+                    const label index = p2heightIdx_[pointi];
+                    const scalar fraction = p2heightFraction_[pointi];
+                    const scalar m = scalar(1);
+                
+                    cachedTransform1_[pointi] =
+                        computePointTransformation(index, fraction, m, motionData);
+                    cachedTransform2_[pointi] =
+                        computePointTransformation(index, fraction, m, nextMotionData);
+                }
+            
+                // SLERP the cached transformations in time
+                const septernion transformation =
+                    slerp(cachedTransform1_[pointi], cachedTransform2_[pointi], timeFraction);
+            
                 if (scale_[pointi] > scalar(1) - SMALL)
                 {
                     pointDisplacement_.primitiveFieldRef()[pointi] =
                         transformation.transformPoint(points0_[pointi])
                       - points0_[pointi];
                 }
-                // Slerp septernion interpolation: scaled septernion
                 else
                 {
                     septernion ss
@@ -641,7 +642,7 @@ Foam::prescribedSLERPMotionSolver::curPoints() const
                 pointDisplacement_.primitiveFieldRef()[pointi] = vector::zero;
             }
         }
-
+    
         return tmp<pointField>
         (
             new pointField(points0() + pointDisplacement_.primitiveField())
