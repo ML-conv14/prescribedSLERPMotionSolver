@@ -285,7 +285,8 @@ Foam::prescribedSLERPMotionSolver::prescribedSLERPMotionSolver
                 const scalar fraction = result.second;
                 const scalar m = scalar(1);
             
-                cachedTransform1_[pointi] = cachedTransform2_[pointi];
+                cachedTransform1_[pointi] =
+                    computePointTransformation(index, fraction, m, motionData);
                 cachedTransform2_[pointi] =
                     computePointTransformation(index, fraction, m, nextMotionData);
             }
@@ -609,8 +610,7 @@ Foam::prescribedSLERPMotionSolver::curPoints() const
                     const scalar fraction = p2heightFraction_[pointi];
                     const scalar m = scalar(1);
                 
-                    cachedTransform1_[pointi] =
-                        computePointTransformation(index, fraction, m, motionData);
+                    cachedTransform1_[pointi] = cachedTransform2_[pointi];
                     cachedTransform2_[pointi] =
                         computePointTransformation(index, fraction, m, nextMotionData);
                 }
