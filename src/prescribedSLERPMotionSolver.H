@@ -42,7 +42,7 @@ Description
 
     - radial: signed weighted radial distance from a Cartesian rotation
       axis
-        h = sign(p_dom) * sqrt((cx*x)^2 + (cy*y)^2 + (cz*z)^2)
+        h = sign(p_max) * sqrt((cx*x)^2 + (cy*y)^2 + (cz*z)^2)
       Suitable for bodies whose surrounding mesh is arranged azimuthally.
       Set exactly two radialCoeffs components to 1 (perpendicular to the
       rotation axis) and one to 0 (along the rotation axis). Section
