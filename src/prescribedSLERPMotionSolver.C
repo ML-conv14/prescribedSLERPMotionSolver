@@ -366,8 +366,8 @@ Foam::prescribedSLERPMotionSolver::p2HeightAssociation
     else // radial
     {
         // Radial mode: signed weighted radial distance
-        // h = sign(p_dom) * sqrt((cx*x)^2 + (cy*y)^2 + (cz*z)^2)
-        // where p_dom is the weighted coordinate with largest absolute
+        // h = sign(p_max) * sqrt((cx*x)^2 + (cy*y)^2 + (cz*z)^2)
+        // where p_max is the weighted coordinate with largest absolute
         // value, used to recover the sign of the radial distance.
         const vector weighted
         (
